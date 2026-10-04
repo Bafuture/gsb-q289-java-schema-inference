@@ -30,3 +30,33 @@ Pair-wise GSB 标注任务仓库（第 17 批 / 289）。
 1. 在本仓库中完成提示词要求的全部内容。
 2. `./mvnw -q verify` 必须通过。
 3. 完成后在所属分支（A 或 B）上提交，产物快照的父提交必须是初始环境快照。
+
+---
+
+## 实现说明（分支 A）
+
+组件位于 `com.example.gsb.schema` 包，零外部依赖：
+
+| 类 | 职责 |
+|----|------|
+| `ValueTypeClassifier` | 单值分类：BOOLEAN → INTEGER → DECIMAL → DATETIME → STRING |
+| `SchemaInferrer` | 单批次推断：类型合并、枚举识别、置信度、空值统计 |
+| `SchemaMerger` | 跨批次合并：EXPAND 扩展 / STRICT 拒绝，绝不静默改类型 |
+| `SchemaRegistry` | 门面：逐批摄入样本并维护累积模式 |
+| `FieldProfile` / `TypeEvolution` | 字段模式与类型演进历史（含枚举快照） |
+| `SchemaStats` | 字段数、类型分布、冲突字段数、枚举字段数 |
+
+关键设计：
+
+- **置信度** = 非空值占比；批内冲突时退化为“主导类型占比 × 非空占比”。
+- **类型合并**：同类型直接合并；INTEGER+DECIMAL → DECIMAL；其余组合报 CONFLICT。
+- **枚举识别**：`distinct < enumMaxDistinctValues` 且 `repetition ≥ enumMinRepetitionRate`（默认 20 / 0.5，可配置）。
+- **空值处理**：null、空白、缺失键统一计为空值，不参与类型判定；空值占比超过阈值（默认 50%）产生警告，全空字段标记 UNKNOWN，后续批次可再定型。
+- **模式演进**：INTEGER → DECIMAL、ENUM → STRING 平滑升级并写入 `typeHistory`；无法合并时 EXPAND 标记 CONFLICT、STRICT 明确拒绝并保留既有类型。
+
+```java
+SchemaRegistry registry = new SchemaRegistry(InferenceConfig.DEFAULT, MergePolicy.EXPAND);
+SchemaMergeResult r1 = registry.ingest(rows1);
+SchemaMergeResult r2 = registry.ingest(rows2);   // 自动演进或报告冲突
+SchemaStats stats = registry.stats();
+```
