@@ -30,3 +30,48 @@ Pair-wise GSB 标注任务仓库（第 17 批 / 289）。
 1. 在本仓库中完成提示词要求的全部内容。
 2. `./mvnw -q verify` 必须通过。
 3. 完成后在所属分支（A 或 B）上提交，产物快照的父提交必须是初始环境快照。
+
+---
+
+## 组件说明（本次实现）
+
+包路径：`com.example.gsb.schemainfer`，入口为 `SchemaEngine`。
+
+### 快速上手
+
+```java
+SchemaEngine engine = new SchemaEngine();               // 默认阈值
+// 或自定义：new SchemaEngine(InferenceConfig.builder().enumMaxDistinct(10).build());
+
+IngestReport r1 = engine.ingestBatch("batch-1", List.of(
+        Map.of("age", "1", "price", "9.9"),
+        Map.of("age", "2", "price", "19.9")));
+
+IngestReport r2 = engine.ingestBatch("batch-2", List.of(
+        Map.of("age", "3.5", "price", "29.9")));        // age: INTEGER -> DECIMAL，记录演进历史
+
+engine.getSchema();            // 既有模式（每字段类型/枚举值/空值统计）
+engine.getEvolutionHistory();  // 全部模式演进记录
+engine.getStatistics();        // 字段数、类型分布、冲突字段数、枚举字段数
+```
+
+### 设计要点
+
+- **类型推断**：单值按 布尔 → 整数 → 小数 → 日期时间 → 字符串 的优先级分类；
+  字段级置信度 = 与主类型组一致的非空值占比（`FieldInference.getConfidence()`）。
+- **冲突合并**：整数与小数同属数值组，合并为小数，不产生冲突；其余跨组混排
+  （如整数 + 布尔）取占比最高的组为解析类型，并把少数派类型记入
+  `getConflictingTypes()`，字段进入冲突名单。
+- **枚举识别**：非空样本数 ≥ `enumMinSamples`、取值种类 ≤ `enumMaxDistinct`、
+  重复率（1 − 种类数/非空数）≥ `enumMinRepetitionRatio` 时判定为枚举，
+  阈值均可通过 `InferenceConfig` 配置。
+- **空值处理**：`null`、空白串与可配置的空值 token（默认 `null`、`n/a`）不参与
+  类型推断；缺失的键按空值计。空值占比 ≥ `highNullRatioThreshold`（默认 0.8）时
+  字段被标记为 `mostlyNull`——类型仍由非空样本给出，但提示下游证据不足；
+  全空字段推断为 `UNKNOWN`，且不会触发跨批次类型变更。
+- **跨批次一致性**：每批次与既有模式逐字段对账——兼容则 `ACCEPTED`
+  （如整数批次进小数字段、任意原子值进字符串字段），可扩展则 `EVOLVED`
+  并写入演进历史，不兼容则 `REJECTED` 且模式保持不变，绝不静默改类型。
+- **模式演进**：整数 → 小数平滑升级；`UNKNOWN` 字段由首个非空批次定型；
+  枚举取值并集超出阈值时显式演进为基类型。所有演进均记录在
+  `SchemaEvolution`（批次、字段、源/目标类型、原因、时间戳）。
